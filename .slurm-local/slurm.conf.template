@@ -1,0 +1,65 @@
+# Minimal 3-node Slurm config (controller + 2 nodes).
+# This is rendered at container start by replacing @CTLD@, @NODE1@, @NODE2@, @CPUS@, @MEM_MB@.
+
+ClusterName=local
+
+SlurmctldHost=@CTLD@
+SlurmctldPort=6817
+SlurmdPort=6818
+
+AuthType=auth/munge
+CryptoType=crypto/munge
+
+SlurmUser=slurm
+SlurmdUser=root
+
+StateSaveLocation=/var/spool/slurmctld
+SlurmdSpoolDir=/var/spool/slurmd
+SlurmctldPidFile=/run/slurmctld.pid
+SlurmdPidFile=/run/slurmd.pid
+
+SwitchType=switch/none
+MpiDefault=none
+ProctrackType=proctrack/linuxproc
+TaskPlugin=task/none
+
+ReturnToService=2
+SlurmctldTimeout=300
+SlurmdTimeout=300
+InactiveLimit=0
+KillWait=30
+MinJobAge=300
+
+SchedulerType=sched/backfill
+SelectType=select/cons_tres
+SelectTypeParameters=CR_Core
+
+# Generic resources (GRES)
+# NOTE: In this local Docker setup we can optionally expose host GPUs to a single node
+# (the controller/compute node) and then group it in a "gpu" partition.
+GresTypes=gpu
+
+SlurmctldLogFile=/var/log/slurm/slurmctld.log
+SlurmdLogFile=/var/log/slurm/slurmd.log
+SlurmctldDebug=info
+SlurmdDebug=info
+
+# Accounting (required for sacct)
+JobAcctGatherType=jobacct_gather/linux
+JobAcctGatherFrequency=30
+
+AccountingStorageType=accounting_storage/slurmdbd
+AccountingStorageHost=@CTLD@
+AccountingStoragePort=6819
+
+# Nodes / partitions
+# - @NODE1_GRES@ / @NODE2_GRES@ are rendered by entrypoint.sh (empty if no GPUs are configured).
+NodeName=@CTLD@  NodeAddr=@CTLD@  CPUs=@CPUS@ RealMemory=@MEM_MB@ State=UNKNOWN
+NodeName=@NODE1@ NodeAddr=@NODE1@ CPUs=@CPUS@ RealMemory=@MEM_MB@ @NODE1_GRES@ State=UNKNOWN
+NodeName=@NODE2@ NodeAddr=@NODE2@ CPUs=@CPUS@ RealMemory=@MEM_MB@ @NODE2_GRES@ State=UNKNOWN
+
+# Default CPU/debug partition
+PartitionName=debug Nodes=@CTLD@,@NODE1@,@NODE2@ Default=YES MaxTime=INFINITE State=UP
+
+# GPU partition (compute nodes only; controller excluded)
+PartitionName=gpu Nodes=@NODE1@,@NODE2@ Default=NO MaxTime=INFINITE State=UP

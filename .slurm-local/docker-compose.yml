@@ -1,0 +1,75 @@
+services:
+  mariadb:
+    image: mariadb:10.11
+    container_name: ${SLURM_DB_CONTAINER_NAME}
+    hostname: mariadb
+    environment:
+      - MARIADB_DATABASE=${SLURM_DB_NAME}
+      - MARIADB_USER=${SLURM_DB_USER}
+      - MARIADB_PASSWORD=${SLURM_DB_PASS}
+      - MARIADB_ROOT_PASSWORD=${SLURM_DB_ROOT_PASS}
+    volumes:
+      - mariadb-data:/var/lib/mysql
+
+  slurmctld:
+    build:
+      context: .
+    image: ${SLURM_IMAGE_NAME}
+    container_name: ${SLURM_CONTAINER_NAME}
+    hostname: ${SLURM_CONTAINER_NAME}
+    environment:
+      - SLURM_ROLE=all
+      - SLURM_NODE_NAME=${SLURM_CONTAINER_NAME}
+      - SLURM_CTLD_HOST=${SLURM_CTLD_HOST}
+      - SLURM_NODE1_NAME=${SLURM_NODE1_NAME}
+      - SLURM_NODE2_NAME=${SLURM_NODE2_NAME}
+      - SLURM_GPU_COUNT=${SLURM_GPU_COUNT:-}
+      - SLURM_DB_HOST=${SLURM_DB_HOST}
+      - SLURM_DB_PORT=${SLURM_DB_PORT}
+      - SLURM_DB_NAME=${SLURM_DB_NAME}
+      - SLURM_DB_USER=${SLURM_DB_USER}
+      - SLURM_DB_PASS=${SLURM_DB_PASS}
+      - SLURM_DBD_PORT=${SLURM_DBD_PORT}
+    volumes:
+      - "${SLURM_WORKDIR}:/work"
+      - slurm-shared:/shared
+    depends_on:
+      - mariadb
+
+  slurm1:
+    image: ${SLURM_IMAGE_NAME}
+    container_name: ${SLURM_NODE1_NAME}
+    hostname: ${SLURM_NODE1_NAME}
+    environment:
+      - SLURM_ROLE=slurmd
+      - SLURM_NODE_NAME=${SLURM_NODE1_NAME}
+      - SLURM_CTLD_HOST=${SLURM_CTLD_HOST}
+      - SLURM_NODE1_NAME=${SLURM_NODE1_NAME}
+      - SLURM_NODE2_NAME=${SLURM_NODE2_NAME}
+      - SLURM_GPU_COUNT=${SLURM_GPU_COUNT:-}
+    volumes:
+      - "${SLURM_WORKDIR}:/work"
+      - slurm-shared:/shared
+    depends_on:
+      - slurmctld
+
+  slurm2:
+    image: ${SLURM_IMAGE_NAME}
+    container_name: ${SLURM_NODE2_NAME}
+    hostname: ${SLURM_NODE2_NAME}
+    environment:
+      - SLURM_ROLE=slurmd
+      - SLURM_NODE_NAME=${SLURM_NODE2_NAME}
+      - SLURM_CTLD_HOST=${SLURM_CTLD_HOST}
+      - SLURM_NODE1_NAME=${SLURM_NODE1_NAME}
+      - SLURM_NODE2_NAME=${SLURM_NODE2_NAME}
+      - SLURM_GPU_COUNT=${SLURM_GPU_COUNT:-}
+    volumes:
+      - "${SLURM_WORKDIR}:/work"
+      - slurm-shared:/shared
+    depends_on:
+      - slurmctld
+
+volumes:
+  slurm-shared:
+  mariadb-data:
