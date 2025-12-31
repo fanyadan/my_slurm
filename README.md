@@ -1,16 +1,24 @@
 # Local Slurm cluster in Docker
 A small, reproducible Slurm cluster for **local development and testing**, running entirely in Docker.
 
-This repository gives you:
-- A 3-node Slurm topology: **controller** + **2 compute nodes** (plus a MariaDB service for accounting).
-- A committed `.slurm-local/` folder containing the compose stack, image definition, and Slurm config template.
-- A host-side `./slurm` wrapper so you can run `sinfo`, `srun`, `sbatch`, `sacct`, etc. without manually `docker exec`-ing.
-- Optional **GPU GRES modeling** (including “fake GPU” device files) so scheduling with `--gres=gpu:X` can be tested even without real GPUs, this needs to set `SLURM_GPU_COUNT=X` at first.
+This repository is intentionally opinionated: it optimizes for “easy to boot, easy to inspect, easy to throw away”, not for production-grade isolation.
+
+## What you get (key features)
+- **3-node Slurm topology** in Docker: **1 controller** + **2 compute nodes** (plus a MariaDB service for accounting).
+- **Self-contained** `.slurm-local/` folder (Compose stack, image definition, Slurm config template).
+- A host-side `./slurm` wrapper so you can run `sinfo`, `srun`, `sbatch`, `sacct`, … without manually `docker exec`-ing.
+- **Multi-node MPI support** using **MPICH + mpi4py**, launched via Slurm **PMI2** (`srun --mpi=pmi2`).
+- Optional **GPU GRES modeling** so scheduling with `--gres=gpu:X` can be tested even without real GPUs.
+- Slurm accounting enabled (`slurmdbd` + MariaDB) so `sacct` works locally.
 
 Primary use cases:
 - Validate `sbatch` / `srun` scripts locally.
-- Test multi-node / multi-rank launches (e.g. `torch.distributed`) without a real cluster.
-- Use `sacct` locally via `slurmdbd` + MariaDB.
+- Test multi-node / multi-rank launches (MPI, or any other launcher supported by Slurm).
+- Reproduce scheduler/resource-request issues without a real cluster.
+
+What this is *not*:
+- A secure multi-tenant cluster.
+- A real GPU-enabled Slurm deployment (the “fake GPU” mode is scheduling-only).
 
 ## Requirements
 - Docker
@@ -36,6 +44,8 @@ Verify:
 ./slurm srun -N3 -n3 hostname
 ```
 
+Tip: running `./slurm` with **no args** opens an interactive shell in the controller container.
+
 ### 2) Submit the example job
 ```bash
 ./slurm sbatch job.sh
@@ -51,13 +61,13 @@ bash setup_slurm_local.sh logs
 bash setup_slurm_local.sh down
 ```
 
-Tip: running `./slurm` with **no args** opens an interactive shell in the controller container.
-
 ## Important concept: what gets mounted at `/work`
 All Slurm containers bind-mount a host directory to `/work`.
 
 - Host path comes from `SLURM_WORKDIR` (written into `.slurm-local/.env`).
 - Inside containers, that host path is always available at `/work`.
+
+By default, `setup_slurm_local.sh up` sets `SLURM_WORKDIR` to your current `$PWD` **at the moment you run the script**.
 
 This matters because `job.sh` executes:
 - `python3 /work/my_agent/news_agent_hf_toolcall.py`
@@ -78,6 +88,18 @@ If you keep `my_agent/` as a sibling repo, start Slurm with a parent mount:
 SLURM_WORKDIR="$(pwd -P)/.." bash setup_slurm_local.sh up
 ```
 
+## Repository layout
+- `README.md`: this documentation
+- `setup_slurm_local.sh`: manage the local cluster (`up`, `down`, `logs`)
+- `slurm`: host wrapper that runs Slurm commands inside the controller container
+- `job.sh`: example multi-node batch job (MPI via PMI2)
+- `.slurm-local/`:
+  - `.env`: generated compose environment (paths, container names, DB creds, GPU count)
+  - `docker-compose.yml`: services + volumes
+  - `Dockerfile`: Slurm image definition
+  - `entrypoint.sh`: container init (munge, config rendering, daemons, accounting bootstrap)
+  - `slurm.conf.template`: Slurm config template
+
 ## High-level architecture
 The Docker Compose stack in `.slurm-local/docker-compose.yml` runs:
 - `mariadb`: accounting DB
@@ -93,17 +115,19 @@ Compose volumes:
 - `slurm-shared`: shared munge key (`/shared/munge.key`) so Slurm auth works across nodes
 - `mariadb-data`: persists the accounting DB across restarts
 
-## Repository layout
-- `README.md`: this documentation
-- `setup_slurm_local.sh`: manage the local cluster (`up`, `down`, `logs`)
-- `slurm`: host wrapper that runs Slurm commands inside the controller container
-- `job.sh`: example multi-node batch job (Torch distributed env wiring)
-- `.slurm-local/`:
-  - `.env`: generated compose environment (paths, container names, DB creds, GPU count)
-  - `docker-compose.yml`: services + volumes
-  - `Dockerfile`: Slurm image definition
-  - `entrypoint.sh`: container init (munge, config rendering, daemons, accounting bootstrap)
-  - `slurm.conf.template`: Slurm config template
+## Partitions and scheduling model
+This setup defines two partitions:
+- `debug` (default): controller + both compute nodes
+- `gpu`: compute nodes only
+
+CPU + memory are rendered at container start by reading `nproc` and `/proc/meminfo` inside the container.
+
+Design note: the config is intentionally minimal and optimized for “does it schedule/run?” rather than strict resource isolation.
+
+### Limitations / design choices (important)
+- No cgroups-based isolation is configured (see `TaskPlugin=task/none` in `.slurm-local/slurm.conf.template`). This is fine for local testing, but don’t treat it like a hardened production cluster.
+- The controller also runs `slurmd` (because `SLURM_ROLE=all`), and the `debug` partition includes it.
+- All nodes share the same host bind mount at `/work` (good for local dev; not representative of a real shared filesystem setup).
 
 ## `setup_slurm_local.sh`
 ### Commands
@@ -120,8 +144,12 @@ bash setup_slurm_local.sh --force up
 The script prefers `docker compose` (Compose plugin). If that’s unavailable, it falls back to `docker-compose`.
 
 ### File generation behavior
-- `.slurm-local/.env` is **always rewritten** on `up` so the bind-mount points at your current directory (unless you override via env vars).
+- `.slurm-local/.env` is **always rewritten** on `up`.
+  - This is what makes `SLURM_WORKDIR` default to “where you ran the script from”.
+  - If you want a stable mount, set `SLURM_WORKDIR=...` explicitly when running `up`.
+  - Any values you rely on (for example `SLURM_GPU_COUNT`) should be passed/exported when you run `up`, otherwise they may be reset.
 - Other files in `.slurm-local/` are only created if missing, unless `--force` is provided.
+  - If you manually edited `.slurm-local/Dockerfile`, `.slurm-local/entrypoint.sh`, etc., **avoid** `--force`.
 
 ### Configuration (environment variables)
 You can override most behavior by exporting env vars when running `setup_slurm_local.sh`.
@@ -135,14 +163,6 @@ Core paths/names:
 - `SLURM_CTLD_HOST`: controller hostname used in config. Default: `${SLURM_CONTAINER_NAME}`.
 - `SLURM_IMAGE_NAME`: image tag. Default: `slurm-local:dev`.
 
-GPU modeling:
-- `SLURM_GPU_COUNT`: integer. Total GPUs to model across the **gpu** partition.
-  - Split across compute nodes at startup:
-    - node1 gets `ceil(total/2)`
-    - node2 gets `floor(total/2)`
-  - If `/dev/nvidia*` exists, `gres.conf` uses real device paths.
-  - Otherwise placeholder files `/dev/fakegpuN` are created and used by `gres.conf`.
-
 Accounting (for `sacct`):
 - `SLURM_DB_HOST`, `SLURM_DB_PORT`
 - `SLURM_DB_NAME`, `SLURM_DB_USER`
@@ -150,7 +170,50 @@ Accounting (for `sacct`):
 - `SLURM_DB_CONTAINER_NAME`
 - `SLURM_DBD_PORT` (default: 6819)
 
+Accounting behavior:
+- The controller starts `slurmdbd` and bootstraps a minimal accounting setup (cluster + default account/user) on startup.
+- MariaDB state is persisted in the `mariadb-data` Docker volume. `down` keeps it; `down -v` wipes it.
+
 Security note: defaults are for **local dev only**.
+
+## GPU GRES modeling (scheduling-only)
+If you want to test `--gres=gpu:X` scheduling logic locally, set `SLURM_GPU_COUNT` when bringing the cluster up:
+```bash
+SLURM_GPU_COUNT=10 bash setup_slurm_local.sh up
+```
+
+How it works:
+- `SLURM_GPU_COUNT` is the **total** number of GPUs to model across the **gpu** partition.
+- At container start, GPUs are split across compute nodes:
+  - node1 gets `ceil(total/2)`
+  - node2 gets `floor(total/2)`
+- `entrypoint.sh` renders both:
+  - `slurm.conf` with `NodeName=... Gres=gpu:X`
+  - node-local `/etc/slurm/gres.conf` with either:
+    - real `/dev/nvidia*` device paths (if present), or
+    - placeholder files `/dev/fakegpuN`
+
+Important:
+- The “fake GPU” mode enables **scheduling tests only**. It does not magically provide CUDA inside the container.
+- If you submit with `--gres=gpu:1` but `SLURM_GPU_COUNT` is empty/0, Slurm may say:
+  - `Requested node configuration is not available`
+
+## MPI support (MPICH + mpi4py + Slurm PMI2)
+The Slurm image includes:
+- MPICH runtime + headers (`mpich`, `libmpich-dev`)
+- `mpi4py` built from source against MPICH (`MPICC=mpicc ... --no-binary=mpi4py`)
+
+Slurm’s MPI “wireup” is done via PMI2. Useful commands:
+```bash
+./slurm srun --mpi=list
+
+# simple 2-node MPI sanity check
+./slurm srun -p gpu --mpi=pmi2 -N2 -n4 -l python3 -c 'from mpi4py import MPI; import socket; comm=MPI.COMM_WORLD; print("rank", comm.Get_rank(), "host", socket.gethostname()); comm.Barrier()'
+```
+
+Important:
+- If you need to run two separate MPI programs, run them as **two separate `srun --mpi=pmi2` steps**.
+  - Starting a second MPI program inside the same `srun` step can fail with PMI errors (e.g. `Broken pipe`).
 
 ## `./slurm` wrapper
 The `slurm` script is a host-side helper that:
@@ -192,6 +255,7 @@ The Slurm image is Ubuntu-based and installs:
 - Munge: for auth (`AuthType=auth/munge`)
 - Utilities used by the entrypoint (`tini`, `gosu`, `netcat-openbsd`, etc.)
 - Python 3 + pip
+- MPICH + mpi4py (see the MPI section)
 
 It also pre-installs Python packages commonly used by the example workload:
 - `requests`, `huggingface_hub`, `numpy`, `torch`, `pydantic`, `langchain`, `langchain-core`, `langgraph`
@@ -229,8 +293,6 @@ Notable settings:
   - `debug` (default): controller + both compute nodes
   - `gpu`: compute nodes only
 
-Design note: this config is intentionally minimal and optimized for “does it schedule/run?” rather than perfect resource isolation.
-
 ## Example batch job (`job.sh`)
 `job.sh` demonstrates a multi-node `srun` launch using **MPI (mpi4py)** via Slurm **PMI2**.
 
@@ -240,7 +302,7 @@ Design note: this config is intentionally minimal and optimized for “does it s
 - `--ntasks=10`
 - `--cpus-per-task=1`
 - `--mem=1G`
-- `--time=00:05:00`
+- `--time=00:05:00` (increase this if your workload is slow or calls external APIs)
 - Logs:
   - `--output=slurm-%j.out`
   - `--error=slurm-%j.err`
@@ -251,14 +313,14 @@ The script sets:
 - `NEWS_AGENT_DISTRIBUTED_BACKEND=mpi`
 - `NEWS_AGENT_MPI_CHECK=1` (optional sanity check)
 
-It launches the workload with:
-- `srun --mpi=pmi2 ...`
+It then runs **two separate MPI steps**:
+- `srun --mpi=pmi2 ... python3 /work/my_agent/news_agent_hf_toolcall.py`
+- `srun --mpi=pmi2 ... python3 /work/my_agent/news_agent_langchain.py`
 
 Notes:
 - Slurm places ranks across nodes (because `--nodes=2` and `--ntasks=10`).
 - PMI2 is what wires up the MPI runtime (env + PMI server) so ranks can communicate.
-- The script intentionally does **not** set torchrun-style `RANK/WORLD_SIZE/LOCAL_RANK`, so the code can auto-detect MPI launches if you use backend=auto.
-- The LangChain script is executed only on rank 0.
+- The script intentionally does **not** set torchrun-style `RANK/WORLD_SIZE/LOCAL_RANK`.
 
 ### Requesting GPUs
 `job.sh` selects the `gpu` partition but does not include `#SBATCH --gres=gpu:...`.
@@ -289,15 +351,20 @@ Accounting:
 ./slurm sacct -j <jobid> -o JobID,JobName%20,Partition%10,State,ExitCode,Elapsed,AllocTRES%60
 ```
 
-MPI smoke test (PMI2 across 2 nodes):
-```bash
-./slurm srun -p gpu --mpi=pmi2 -N2 -n4 -l python3 -c 'from mpi4py import MPI; import socket; comm=MPI.COMM_WORLD; print("rank", comm.Get_rank(), "host", socket.gethostname()); comm.Barrier()'
-```
-
 Inspect rendered config:
 ```bash
 ./slurm bash -lc 'cat /etc/slurm/slurm.conf'
 ./slurm bash -lc 'cat /etc/slurm/gres.conf'
+```
+
+Logs:
+- Follow container logs (includes Slurm daemon logs streamed by the entrypoint):
+```bash
+bash setup_slurm_local.sh logs
+```
+- Or inspect log files inside the controller:
+```bash
+./slurm bash -lc 'ls -l /var/log/slurm && tail -n 200 /var/log/slurm/slurmctld.log'
 ```
 
 ## Troubleshooting
@@ -321,18 +388,30 @@ Debug:
 ./slurm sbatch --test-only --gres=gpu:1 job.sh
 ```
 
+### PMI / MPI errors (e.g. `Broken pipe`)
+If you see PMI errors like `Broken pipe` / `PMI_Get_appnum returned -1`, make sure you are not launching multiple MPI programs inside the same `srun --mpi=pmi2` step.
+
+Preferred pattern:
+- multiple programs => multiple `srun --mpi=pmi2 ...` steps
+
 ### `srun: ... Aborted` / step cancelled
 This usually means one rank crashed and `--kill-on-bad-exit=1` terminated the step.
 - Check `slurm-<jobid>.out` and `slurm-<jobid>.err`.
 - Reduce to `--nodes=1 --ntasks=1` to surface a clean traceback.
 
+### Job cancelled due to time limit
+If you see:
+- `*** JOB <id> ... CANCELLED ... DUE TO TIME LIMIT ***`
+
+Increase `#SBATCH --time=...` in your job script.
+
 ### Resetting the environment
 `bash setup_slurm_local.sh down` stops containers but keeps the Docker volumes (including the accounting DB).
 
-To wipe persisted state, you can remove the volumes from `.slurm-local/`:
+To wipe persisted state, remove volumes from `.slurm-local/`:
 ```bash
 # destructive: removes slurm-shared and mariadb-data
-cd .slurm-local && docker compose down -v
+cd .slurm-local && (docker compose down -v || docker-compose down -v)
 ```
 
 ## `.gitignore`
