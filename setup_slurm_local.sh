@@ -199,7 +199,12 @@ RUN apt-get -o Acquire::Retries=5 update \
     python3 \
     python3-pip \
     python3-venv \
+    python3-dev \
     python-is-python3 \
+    build-essential \
+    pkg-config \
+    mpich \
+    libmpich-dev \
     slurm-client \
     slurmctld \
     slurmd \
@@ -208,7 +213,7 @@ RUN apt-get -o Acquire::Retries=5 update \
  && rm -rf /var/lib/apt/lists/*
 
 # Python deps for common job scripts (keeps Slurm image self-contained)
-RUN python3 -m pip install --no-cache-dir \
+RUN MPICC=mpicc python3 -m pip install --no-cache-dir --no-binary=mpi4py \
     requests \
     huggingface_hub \
     numpy \
@@ -216,7 +221,8 @@ RUN python3 -m pip install --no-cache-dir \
     pydantic \
     langchain \
     langchain-core \
-    langgraph
+    langgraph \
+    mpi4py
 
 COPY entrypoint.sh /entrypoint.sh
 COPY slurm.conf.template /slurm.conf.template

@@ -10,21 +10,25 @@
 #SBATCH --ntasks=10
 #SBATCH --export=ALL
 
-# Real distributed mode for /work/my_agent/news_agent_hf_toolcall.py
-# - Uses torch.distributed with init_method=env://
-# - Requires MASTER_ADDR/MASTER_PORT + per-rank RANK/WORLD_SIZE
+# Distributed mode for /work/my_agent/news_agent_hf_toolcall.py
+# - Uses mpi4py collectives
+# - Launched by Slurm with PMI2 support (srun --mpi=pmi2)
 export NEWS_AGENT_DISTRIBUTED_MODE=shard
-export NEWS_AGENT_TORCH_BACKEND=gloo
+export NEWS_AGENT_DISTRIBUTED_BACKEND=mpi
 
-MASTER_ADDR="$(scontrol show hostnames "$SLURM_JOB_NODELIST" | head -n 1)"
-MASTER_PORT="$((20000 + (SLURM_JOB_ID % 40000)))"
-export MASTER_ADDR MASTER_PORT
+# Optional: enable MPI startup validation (prints a host distribution summary from rank 0)
+export NEWS_AGENT_MPI_CHECK=1
 
-# Launch one process per task. Each task maps Slurm env -> torch env.
-srun -l --kill-on-bad-exit=1 bash -lc '
-  export RANK="$SLURM_PROCID"
-  export WORLD_SIZE="$SLURM_NTASKS"
-  export LOCAL_RANK="$SLURM_LOCALID"
-  python3 /work/my_agent/news_agent_hf_toolcall.py
-  python3 /work/my_agent/news_agent_langchain.py
-'
+# Launch one process per task across nodes, with PMI2 environment for MPI.
+# NOTE: We intentionally do NOT export torchrun-style RANK/WORLD_SIZE/LOCAL_RANK here
+# so the code can auto-detect MPI launches if desired.
+#
+# IMPORTANT: Do not run two separate MPI programs back-to-back inside the same srun step,
+# because the second MPI_Init can fail with PMI "Broken pipe". Instead, run them as
+# separate srun steps.
+
+# Step 1: MPI-sharded HF tool-call agent
+srun --mpi=pmi2 -l --kill-on-bad-exit=1 python3 /work/my_agent/news_agent_hf_toolcall.py
+
+# Step 2: MPI-sharded LangChain agent
+srun --mpi=pmi2 -l --kill-on-bad-exit=1 python3 /work/my_agent/news_agent_langchain.py

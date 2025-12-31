@@ -232,7 +232,7 @@ Notable settings:
 Design note: this config is intentionally minimal and optimized for “does it schedule/run?” rather than perfect resource isolation.
 
 ## Example batch job (`job.sh`)
-`job.sh` demonstrates a multi-node `srun` launch with Torch-style env wiring.
+`job.sh` demonstrates a multi-node `srun` launch using **MPI (mpi4py)** via Slurm **PMI2**.
 
 ### SBATCH directives
 - `--partition=gpu`
@@ -245,23 +245,20 @@ Design note: this config is intentionally minimal and optimized for “does it s
   - `--output=slurm-%j.out`
   - `--error=slurm-%j.err`
 
-### Distributed env mapping
+### Distributed mode (MPI)
 The script sets:
 - `NEWS_AGENT_DISTRIBUTED_MODE=shard`
-- `NEWS_AGENT_TORCH_BACKEND=gloo`
+- `NEWS_AGENT_DISTRIBUTED_BACKEND=mpi`
+- `NEWS_AGENT_MPI_CHECK=1` (optional sanity check)
 
-And derives:
-- `MASTER_ADDR` from the first hostname in `$SLURM_JOB_NODELIST`
-- `MASTER_PORT` from job id
-
-Then uses `srun -l --kill-on-bad-exit=1` and maps Slurm env → Torch env:
-- `RANK=$SLURM_PROCID`
-- `WORLD_SIZE=$SLURM_NTASKS`
-- `LOCAL_RANK=$SLURM_LOCALID`
+It launches the workload with:
+- `srun --mpi=pmi2 ...`
 
 Notes:
-- `--kill-on-bad-exit=1` is convenient for tests but will cancel the whole step if a single rank fails.
-- Two Python scripts run back-to-back per rank; if both initialize distributed state, ensure they don’t conflict.
+- Slurm places ranks across nodes (because `--nodes=2` and `--ntasks=10`).
+- PMI2 is what wires up the MPI runtime (env + PMI server) so ranks can communicate.
+- The script intentionally does **not** set torchrun-style `RANK/WORLD_SIZE/LOCAL_RANK`, so the code can auto-detect MPI launches if you use backend=auto.
+- The LangChain script is executed only on rank 0.
 
 ### Requesting GPUs
 `job.sh` selects the `gpu` partition but does not include `#SBATCH --gres=gpu:...`.
@@ -290,6 +287,11 @@ Dry-run scheduling (no execution):
 Accounting:
 ```bash
 ./slurm sacct -j <jobid> -o JobID,JobName%20,Partition%10,State,ExitCode,Elapsed,AllocTRES%60
+```
+
+MPI smoke test (PMI2 across 2 nodes):
+```bash
+./slurm srun -p gpu --mpi=pmi2 -N2 -n4 -l python3 -c 'from mpi4py import MPI; import socket; comm=MPI.COMM_WORLD; print("rank", comm.Get_rank(), "host", socket.gethostname()); comm.Barrier()'
 ```
 
 Inspect rendered config:
