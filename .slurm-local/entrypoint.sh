@@ -15,6 +15,29 @@ DB_USER="${SLURM_DB_USER:-slurm}"
 DB_PASS="${SLURM_DB_PASS:-slurm}"
 DBD_PORT="${SLURM_DBD_PORT:-6819}"
 
+# Multi-tenant config
+ADMIN_ACCOUNT="${SLURM_ADMIN_ACCOUNT:-admin}"
+TENANTS_RAW="${SLURM_TENANTS:-}"
+TENANTS_DIR="${SLURM_TENANTS_DIR:-/work/tenants}"
+TENANT_UID_BASE="${SLURM_TENANT_UID_BASE:-10000}"
+TENANT_GID_BASE="${SLURM_TENANT_GID_BASE:-10000}"
+
+# Host identity (optional): create a matching login user inside containers.
+HOST_USER_NAME="${SLURM_HOST_USER_NAME:-}"
+HOST_UID_RAW="${SLURM_HOST_UID:-}"
+HOST_GID_RAW="${SLURM_HOST_GID:-}"
+
+# Optional: enable Slurm cgroups (requires sufficient container permissions; see README)
+ENABLE_CGROUP_RAW="${SLURM_ENABLE_CGROUP:-0}"
+ENABLE_CGROUP=0
+if [[ "${ENABLE_CGROUP_RAW,,}" =~ ^(1|true|yes)$ ]]; then
+  ENABLE_CGROUP=1
+fi
+
+declare -a TENANT_NAMES=()
+declare -a TENANT_UIDS=()
+declare -a TENANT_GIDS=()
+
 # GPU config (optional)
 # SLURM_GPU_COUNT is the total number of GPUs to model across the GPU partition.
 # We split them across NODE1 and NODE2 so the controller node stays out of GPU scheduling.
@@ -48,6 +71,87 @@ ensure_user() {
   useradd --system --create-home --home-dir "$home" --shell /usr/sbin/nologin "$user"
 }
 
+ensure_login_user_with_ids() {
+  local user="$1"
+  local uid="$2"
+  local gid="$3"
+
+  if id -u "$user" >/dev/null 2>&1; then
+    return
+  fi
+
+  if getent passwd "$uid" >/dev/null 2>&1; then
+    echo "ERROR: UID $uid already exists in container; cannot create user '$user'" >&2
+    exit 1
+  fi
+
+  # If the GID already exists, reuse that group; otherwise create a dedicated group.
+  if ! getent group "$gid" >/dev/null 2>&1; then
+    if ! getent group "$user" >/dev/null 2>&1; then
+      groupadd -g "$gid" "$user"
+    fi
+  fi
+
+  useradd --uid "$uid" --gid "$gid" --create-home --home-dir "/home/$user" --shell /bin/bash "$user"
+}
+
+trim_ws() {
+  local s="$1"
+  # trim leading
+  s="${s#"${s%%[![:space:]]*}"}"
+  # trim trailing
+  s="${s%"${s##*[![:space:]]}"}"
+  printf '%s' "$s"
+}
+
+parse_tenants() {
+  local raw="$1"
+  local idx=0
+
+  if [[ -z "$raw" ]]; then
+    return
+  fi
+
+  local item name uid gid
+  IFS=',' read -r -a items <<<"$raw"
+  for item in "${items[@]}"; do
+    item="$(trim_ws "$item")"
+    [[ -z "$item" ]] && continue
+
+    name=""
+    uid=""
+    gid=""
+
+    IFS=':' read -r name uid gid <<<"$item"
+    name="$(trim_ws "$name")"
+    name="${name,,}"
+
+    if [[ -z "$name" || ! "$name" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]]; then
+      echo "WARN: skipping invalid tenant spec: '$item'" >&2
+      continue
+    fi
+
+    if [[ -z "${uid:-}" ]]; then
+      uid=$((TENANT_UID_BASE + idx))
+    fi
+    if [[ -z "${gid:-}" ]]; then
+      gid=$((TENANT_GID_BASE + idx))
+    fi
+
+    if [[ ! "$uid" =~ ^[0-9]+$ || ! "$gid" =~ ^[0-9]+$ ]]; then
+      echo "WARN: skipping tenant with non-numeric uid/gid: '$item'" >&2
+      continue
+    fi
+
+    TENANT_NAMES+=("$name")
+    TENANT_UIDS+=("$uid")
+    TENANT_GIDS+=("$gid")
+    idx=$((idx + 1))
+  done
+}
+
+parse_tenants "$TENANTS_RAW"
+
 wait_for_tcp() {
   local host="$1"
   local port="$2"
@@ -75,12 +179,69 @@ bootstrap_accounting() {
   done
 
   sacctmgr -i add cluster "$cluster" >/dev/null 2>&1 || true
-  sacctmgr -i add account default Description="Default account" >/dev/null 2>&1 || true
-  sacctmgr -i add user root Account=default DefaultAccount=default >/dev/null 2>&1 || true
+
+  # Admin account (cluster operators)
+  sacctmgr -i add account "$ADMIN_ACCOUNT" Description="Admin account" >/dev/null 2>&1 || true
+  sacctmgr -i add user root Account="$ADMIN_ACCOUNT" DefaultAccount="$ADMIN_ACCOUNT" >/dev/null 2>&1 || true
+
+  if [[ -n "${HOST_USER_NAME}" ]]; then
+    sacctmgr -i add user "$HOST_USER_NAME" Account="$ADMIN_ACCOUNT" DefaultAccount="$ADMIN_ACCOUNT" >/dev/null 2>&1 || true
+  fi
+
+  # Tenants: 1 tenant == 1 Slurm account + 1 Unix user (same name)
+  local i t
+  for i in "${!TENANT_NAMES[@]}"; do
+    t="${TENANT_NAMES[$i]}"
+    sacctmgr -i add account "$t" Description="Tenant account: $t" >/dev/null 2>&1 || true
+    sacctmgr -i add user "$t" Account="$t" DefaultAccount="$t" >/dev/null 2>&1 || true
+  done
 }
 
 ensure_user munge /nonexistent
 ensure_user slurm /var/lib/slurm
+
+# Create a host-matching login user (so sbatch/srun can run as non-root by default).
+HOST_UID=""
+HOST_GID=""
+if [[ "${HOST_UID_RAW}" =~ ^[0-9]+$ ]]; then
+  HOST_UID="${HOST_UID_RAW}"
+fi
+if [[ "${HOST_GID_RAW}" =~ ^[0-9]+$ ]]; then
+  HOST_GID="${HOST_GID_RAW}"
+fi
+
+if [[ -n "${HOST_USER_NAME}" && -n "${HOST_UID}" && -n "${HOST_GID}" ]]; then
+  ensure_login_user_with_ids "$HOST_USER_NAME" "$HOST_UID" "$HOST_GID"
+fi
+
+# Ensure admin Unix group exists and include the host user.
+# We use AllowGroups in partitions for access control (more reliable than AllowAccounts in this dev setup).
+if [[ -n "${ADMIN_ACCOUNT}" ]]; then
+  if ! getent group "$ADMIN_ACCOUNT" >/dev/null 2>&1; then
+    groupadd "$ADMIN_ACCOUNT" >/dev/null 2>&1 || true
+  fi
+  if [[ -n "${HOST_USER_NAME}" ]] && id -u "$HOST_USER_NAME" >/dev/null 2>&1; then
+    usermod -aG "$ADMIN_ACCOUNT" "$HOST_USER_NAME" >/dev/null 2>&1 || true
+  fi
+fi
+
+# Create tenant users and their home directories.
+for i in "${!TENANT_NAMES[@]}"; do
+  ensure_login_user_with_ids "${TENANT_NAMES[$i]}" "${TENANT_UIDS[$i]}" "${TENANT_GIDS[$i]}"
+done
+
+# Create per-tenant work directories under the shared /work mount.
+if [[ "${#TENANT_NAMES[@]}" -gt 0 ]]; then
+  mkdir -p "$TENANTS_DIR" || true
+  chmod 0755 "$TENANTS_DIR" || true
+
+  for i in "${!TENANT_NAMES[@]}"; do
+    d="$TENANTS_DIR/${TENANT_NAMES[$i]}"
+    mkdir -p "$d" || true
+    chown "${TENANT_UIDS[$i]}:${TENANT_GIDS[$i]}" "$d" || true
+    chmod 0750 "$d" || true
+  done
+fi
 
 # Shared munge key so auth works across containers.
 install -d -m 0755 "$SHARED_DIR"
@@ -119,15 +280,67 @@ CPUS="$(nproc)"
 MEM_MB="$(awk '/MemTotal/ {print int($2/1024)}' /proc/meminfo)"
 
 install -d -m 0755 /etc/slurm /etc/slurm-llnl
-sed -e "s/@CTLD@/${CTLD_HOST}/g" \
-    -e "s/@NODE1@/${NODE1_NAME}/g" \
-    -e "s/@NODE2@/${NODE2_NAME}/g" \
-    -e "s/@NODE1_GRES@/${NODE1_GRES}/g" \
-    -e "s/@NODE2_GRES@/${NODE2_GRES}/g" \
-    -e "s/@CPUS@/${CPUS}/g" \
-    -e "s/@MEM_MB@/${MEM_MB}/g" \
-    /slurm.conf.template > /etc/slurm/slurm.conf
+
+PROCTRACK_TYPE="proctrack/linuxproc"
+TASK_PLUGIN="task/none"
+if [[ "$ENABLE_CGROUP" -eq 1 ]]; then
+  PROCTRACK_TYPE="proctrack/cgroup"
+  TASK_PLUGIN="task/cgroup"
+fi
+
+DEBUG_PARTITION_ACCESS=""
+GPU_PARTITION_ACCESS=""
+if [[ -n "$ADMIN_ACCOUNT" ]]; then
+  # Allow teama to use the admin partitions (debug/gpu) alongside the admin account.
+  admin_part_allow_groups="${ADMIN_ACCOUNT},teama"
+  admin_part_allow_accounts="${ADMIN_ACCOUNT},teama"
+  DEBUG_PARTITION_ACCESS="AllowGroups=${admin_part_allow_groups} AllowAccounts=${admin_part_allow_accounts}"
+  GPU_PARTITION_ACCESS="AllowGroups=${admin_part_allow_groups} AllowAccounts=${admin_part_allow_accounts}"
+fi
+
+TENANT_PARTITIONS=""
+for i in "${!TENANT_NAMES[@]}"; do
+  t="${TENANT_NAMES[$i]}"
+
+  tenant_allow_groups="$t"
+  tenant_allow_accounts="$t"
+  if [[ -n "$ADMIN_ACCOUNT" ]]; then
+    tenant_allow_groups="$t,$ADMIN_ACCOUNT"
+    tenant_allow_accounts="$t,$ADMIN_ACCOUNT"
+  fi
+
+  TENANT_PARTITIONS+="PartitionName=${t} Nodes=${NODE1_NAME},${NODE2_NAME} Default=NO MaxTime=INFINITE State=UP AllowGroups=${tenant_allow_groups} AllowAccounts=${tenant_allow_accounts}"$'\n'
+done
+TENANT_PARTITIONS="${TENANT_PARTITIONS%$'\n'}"
+
+TMP_CONF="$(mktemp)"
+sed -e "s|@CTLD@|${CTLD_HOST}|g" \
+    -e "s|@NODE1@|${NODE1_NAME}|g" \
+    -e "s|@NODE2@|${NODE2_NAME}|g" \
+    -e "s|@NODE1_GRES@|${NODE1_GRES}|g" \
+    -e "s|@NODE2_GRES@|${NODE2_GRES}|g" \
+    -e "s|@PROCTRACK_TYPE@|${PROCTRACK_TYPE}|g" \
+    -e "s|@TASK_PLUGIN@|${TASK_PLUGIN}|g" \
+    -e "s|@DEBUG_PARTITION_ACCESS@|${DEBUG_PARTITION_ACCESS}|g" \
+    -e "s|@GPU_PARTITION_ACCESS@|${GPU_PARTITION_ACCESS}|g" \
+    -e "s|@CPUS@|${CPUS}|g" \
+    -e "s|@MEM_MB@|${MEM_MB}|g" \
+    /slurm.conf.template > "$TMP_CONF"
+
+awk -v tp="$TENANT_PARTITIONS" '{ if ($0 == "@TENANT_PARTITIONS@") { if (tp != "") print tp; next } print }' "$TMP_CONF" > /etc/slurm/slurm.conf
+rm -f "$TMP_CONF"
+
 cp /etc/slurm/slurm.conf /etc/slurm-llnl/slurm.conf
+
+# Optional: Slurm cgroup plugin configuration
+if [[ "$ENABLE_CGROUP" -eq 1 ]]; then
+  cat >/etc/slurm/cgroup.conf <<'EOF'
+CgroupAutomount=yes
+ConstrainCores=yes
+ConstrainRAMSpace=yes
+EOF
+  cp /etc/slurm/cgroup.conf /etc/slurm-llnl/cgroup.conf
+fi
 
 # Render gres.conf for the local node (slurmd reads this) so GRES matches slurm.conf.
 : > /etc/slurm/gres.conf

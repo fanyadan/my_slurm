@@ -74,6 +74,22 @@ if [[ -n "${SLURM_WORKDIR:-}" ]]; then
   fi
 fi
 
+# Choose which user to exec as inside the controller container.
+# - Default: run as the *host* uid:gid (so Slurm sees non-root users and can enforce multi-tenant policies).
+# - Override:
+#   - SLURM_EXEC_USER=<name|uid[:gid]>
+#   - SLURM_EXEC_UID=<uid> and/or SLURM_EXEC_GID=<gid>
+EXEC_USER_ARGS=()
+if [[ -n "${SLURM_EXEC_USER:-}" ]]; then
+  EXEC_USER_ARGS+=( -u "${SLURM_EXEC_USER}" )
+elif [[ -n "${SLURM_EXEC_UID:-}" || -n "${SLURM_EXEC_GID:-}" ]]; then
+  uid="${SLURM_EXEC_UID:-$(id -u)}"
+  gid="${SLURM_EXEC_GID:-$(id -g)}"
+  EXEC_USER_ARGS+=( -u "${uid}:${gid}" )
+else
+  EXEC_USER_ARGS+=( -u "$(id -u):$(id -g)" )
+fi
+
 # Pass selected host env vars through to the exec'd command inside the container.
 # This keeps secrets out of repo files while still making them available to sbatch/srun.
 EXTRA_ENV_ARGS=()
@@ -83,7 +99,7 @@ EXTRA_ENV_ARGS=()
 [[ -n "${NEWS_API_KEY:-}" ]] && EXTRA_ENV_ARGS+=( -e NEWS_API_KEY )
 
 if [[ $# -eq 0 ]]; then
-  exec docker exec -it "${EXTRA_ENV_ARGS[@]}" -w "$WORKDIR_IN_CONTAINER" "$CONTAINER_NAME" bash
+  exec docker exec -it "${EXEC_USER_ARGS[@]}" "${EXTRA_ENV_ARGS[@]}" -w "$WORKDIR_IN_CONTAINER" "$CONTAINER_NAME" bash
 fi
 
-exec docker exec -it "${EXTRA_ENV_ARGS[@]}" -w "$WORKDIR_IN_CONTAINER" "$CONTAINER_NAME" "$@"
+exec docker exec -it "${EXEC_USER_ARGS[@]}" "${EXTRA_ENV_ARGS[@]}" -w "$WORKDIR_IN_CONTAINER" "$CONTAINER_NAME" "$@"

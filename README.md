@@ -17,7 +17,8 @@ Primary use cases:
 - Reproduce scheduler/resource-request issues without a real cluster.
 
 What this is *not*:
-- A secure multi-tenant cluster.
+- A **secure** multi-tenant cluster.
+  - This repo can simulate multi-tenant *policies* (users/accounts/partitions), but it’s not a hardened production environment.
 - A real GPU-enabled Slurm deployment (the “fake GPU” mode is scheduling-only).
 
 ## Requirements
@@ -116,16 +117,46 @@ Compose volumes:
 - `mariadb-data`: persists the accounting DB across restarts
 
 ## Partitions and scheduling model
-This setup defines two partitions:
-- `debug` (default): controller + both compute nodes
-- `gpu`: compute nodes only
+This setup defines:
+- `debug` (default): controller + both compute nodes (restricted via `AllowGroups`/`AllowAccounts`; defaults to `admin,teama`)
+- `gpu`: compute nodes only (restricted via `AllowGroups`/`AllowAccounts`; defaults to `admin,teama`)
+- **Tenant partitions** (generated at container start from `SLURM_TENANTS`): one partition per tenant, compute nodes only
 
 CPU + memory are rendered at container start by reading `nproc` and `/proc/meminfo` inside the container.
 
 Design note: the config is intentionally minimal and optimized for “does it schedule/run?” rather than strict resource isolation.
 
+### Multi-tenant mode (partition-per-tenant)
+This repo supports a basic “multi-tenant” model for local testing:
+- Each tenant is represented as:
+  - a Unix login user inside the containers
+  - a Slurm account (same name)
+  - a Slurm partition (same name), restricted via `AllowGroups=<tenant>`
+    - (The admin group is also allowed so operators can debug all tenants.)
+
+Enable it by setting `SLURM_TENANTS` when bringing the cluster up:
+```bash
+# Two example tenants with explicit UID/GID
+SLURM_TENANTS='teama:10001:10001,teamb:10002:10002' \
+  bash setup_slurm_local.sh up
+```
+
+Then submit/run as a tenant by overriding which user `./slurm` execs as:
+```bash
+# Run a command as teamA (inside the controller container)
+SLURM_EXEC_USER=teama ./slurm srun -p teama -n1 hostname
+
+# This should fail (teama cannot use teamb partition)
+SLURM_EXEC_USER=teama ./slurm srun -p teamb -n1 hostname
+```
+
+Per-tenant work dirs:
+- The entrypoint creates per-tenant directories under `SLURM_TENANTS_DIR` (default: `/work/tenants`).
+- Example: `/work/tenants/teama`, `/work/tenants/teamb`.
+
 ### Limitations / design choices (important)
-- No cgroups-based isolation is configured (see `TaskPlugin=task/none` in `.slurm-local/slurm.conf.template`). This is fine for local testing, but don’t treat it like a hardened production cluster.
+- This is not a hardened security boundary. Treat it as a *policy simulation* for Slurm.
+- No cgroups isolation by default (see `SLURM_ENABLE_CGROUP` below).
 - The controller also runs `slurmd` (because `SLURM_ROLE=all`), and the `debug` partition includes it.
 - All nodes share the same host bind mount at `/work` (good for local dev; not representative of a real shared filesystem setup).
 
@@ -148,6 +179,8 @@ The script prefers `docker compose` (Compose plugin). If that’s unavailable, i
   - This is what makes `SLURM_WORKDIR` default to “where you ran the script from”.
   - If you want a stable mount, set `SLURM_WORKDIR=...` explicitly when running `up`.
   - Any values you rely on (for example `SLURM_GPU_COUNT`) should be passed/exported when you run `up`, otherwise they may be reset.
+  - `.slurm-local/.env` is generated and host-specific; it is not meant to be committed.
+    - See `.slurm-local/.env.example` for a safe, committed reference.
 - Other files in `.slurm-local/` are only created if missing, unless `--force` is provided.
   - If you manually edited `.slurm-local/Dockerfile`, `.slurm-local/entrypoint.sh`, etc., **avoid** `--force`.
 
@@ -163,6 +196,18 @@ Core paths/names:
 - `SLURM_CTLD_HOST`: controller hostname used in config. Default: `${SLURM_CONTAINER_NAME}`.
 - `SLURM_IMAGE_NAME`: image tag. Default: `slurm-local:dev`.
 
+Multi-tenant:
+- `SLURM_ADMIN_ACCOUNT`: admin Slurm account name. Default: `admin`.
+- `SLURM_TENANTS`: comma-separated tenant specs. Each tenant becomes a user+account+partition.
+  - Format: `name[:uid[:gid]]`
+  - Example: `teama:10001:10001,teamb:10002:10002`
+- `SLURM_TENANTS_DIR`: where to create per-tenant dirs inside containers. Default: `/work/tenants`.
+- `SLURM_TENANT_UID_BASE`, `SLURM_TENANT_GID_BASE`: base IDs used when uid/gid aren’t specified in `SLURM_TENANTS`. Defaults: `10000`.
+
+Optional isolation:
+- `SLURM_ENABLE_CGROUP`: set to `1` to enable `task/cgroup` + `proctrack/cgroup` and write `cgroup.conf`.
+- `SLURM_PRIVILEGED`: set to `true` to run Slurm containers privileged (sometimes required for cgroups to work).
+
 Accounting (for `sacct`):
 - `SLURM_DB_HOST`, `SLURM_DB_PORT`
 - `SLURM_DB_NAME`, `SLURM_DB_USER`
@@ -171,7 +216,7 @@ Accounting (for `sacct`):
 - `SLURM_DBD_PORT` (default: 6819)
 
 Accounting behavior:
-- The controller starts `slurmdbd` and bootstraps a minimal accounting setup (cluster + default account/user) on startup.
+- The controller starts `slurmdbd` and bootstraps a minimal accounting setup (admin + tenants) on startup.
 - MariaDB state is persisted in the `mariadb-data` Docker volume. `down` keeps it; `down -v` wipes it.
 
 Security note: defaults are for **local dev only**.
@@ -219,6 +264,7 @@ Important:
 The `slurm` script is a host-side helper that:
 - Checks Docker is available and the controller container is running.
 - Runs your command inside the controller container using `docker exec -it ...`.
+- Defaults to running as the **host uid:gid** inside the container (so Slurm sees non-root users).
 - Sets `-w` so relative paths (like `job.sh`) work from subdirectories.
 
 Examples:
@@ -238,6 +284,8 @@ The wrapper figures out the in-container working directory by:
 Override knobs:
 - `SLURM_CONTAINER_NAME`: controller container name to exec into
 - `SLURM_ENV_FILE`: alternate env file path (default: `./.slurm-local/.env`)
+- `SLURM_EXEC_USER`: exec as a specific container user (e.g. `teama`, or `root`)
+- `SLURM_EXEC_UID` / `SLURM_EXEC_GID`: exec as a specific uid/gid
 
 ### Passing secrets/tokens safely
 The wrapper passes selected env vars through to the container **by name** (no values are written to disk):
@@ -298,6 +346,7 @@ Notable settings:
 
 ### SBATCH directives
 - `--partition=gpu`
+  - By default, `gpu` is restricted via `AllowGroups`/`AllowAccounts` (defaults to `admin,teama`); submit with `-p <tenant>` if needed (command-line options override SBATCH directives).
 - `--nodes=2`
 - `--ntasks=10`
 - `--cpus-per-task=1`
@@ -327,7 +376,11 @@ Notes:
 
 To enforce GPU allocation:
 ```bash
+# admin partition
 ./slurm sbatch --gres=gpu:1 job.sh
+
+# tenant partition
+SLURM_EXEC_USER=teama ./slurm sbatch -p teama --gres=gpu:1 job.sh
 ```
 
 ## Useful commands

@@ -17,6 +17,7 @@ services:
     image: ${SLURM_IMAGE_NAME}
     container_name: ${SLURM_CONTAINER_NAME}
     hostname: ${SLURM_CONTAINER_NAME}
+    privileged: ${SLURM_PRIVILEGED:-false}
     environment:
       - SLURM_ROLE=all
       - SLURM_NODE_NAME=${SLURM_CONTAINER_NAME}
@@ -30,6 +31,15 @@ services:
       - SLURM_DB_USER=${SLURM_DB_USER}
       - SLURM_DB_PASS=${SLURM_DB_PASS}
       - SLURM_DBD_PORT=${SLURM_DBD_PORT}
+      - SLURM_HOST_USER_NAME=${SLURM_HOST_USER_NAME:-}
+      - SLURM_HOST_UID=${SLURM_HOST_UID:-}
+      - SLURM_HOST_GID=${SLURM_HOST_GID:-}
+      - SLURM_ADMIN_ACCOUNT=${SLURM_ADMIN_ACCOUNT:-admin}
+      - SLURM_TENANTS=${SLURM_TENANTS:-}
+      - SLURM_TENANTS_DIR=${SLURM_TENANTS_DIR:-/work/tenants}
+      - SLURM_TENANT_UID_BASE=${SLURM_TENANT_UID_BASE:-10000}
+      - SLURM_TENANT_GID_BASE=${SLURM_TENANT_GID_BASE:-10000}
+      - SLURM_ENABLE_CGROUP=${SLURM_ENABLE_CGROUP:-0}
     volumes:
       - "${SLURM_WORKDIR}:/work"
       - slurm-shared:/shared
@@ -40,6 +50,7 @@ services:
     image: ${SLURM_IMAGE_NAME}
     container_name: ${SLURM_NODE1_NAME}
     hostname: ${SLURM_NODE1_NAME}
+    privileged: ${SLURM_PRIVILEGED:-false}
     environment:
       - SLURM_ROLE=slurmd
       - SLURM_NODE_NAME=${SLURM_NODE1_NAME}
@@ -47,6 +58,15 @@ services:
       - SLURM_NODE1_NAME=${SLURM_NODE1_NAME}
       - SLURM_NODE2_NAME=${SLURM_NODE2_NAME}
       - SLURM_GPU_COUNT=${SLURM_GPU_COUNT:-}
+      - SLURM_HOST_USER_NAME=${SLURM_HOST_USER_NAME:-}
+      - SLURM_HOST_UID=${SLURM_HOST_UID:-}
+      - SLURM_HOST_GID=${SLURM_HOST_GID:-}
+      - SLURM_ADMIN_ACCOUNT=${SLURM_ADMIN_ACCOUNT:-admin}
+      - SLURM_TENANTS=${SLURM_TENANTS:-}
+      - SLURM_TENANTS_DIR=${SLURM_TENANTS_DIR:-/work/tenants}
+      - SLURM_TENANT_UID_BASE=${SLURM_TENANT_UID_BASE:-10000}
+      - SLURM_TENANT_GID_BASE=${SLURM_TENANT_GID_BASE:-10000}
+      - SLURM_ENABLE_CGROUP=${SLURM_ENABLE_CGROUP:-0}
     volumes:
       - "${SLURM_WORKDIR}:/work"
       - slurm-shared:/shared
@@ -57,6 +77,7 @@ services:
     image: ${SLURM_IMAGE_NAME}
     container_name: ${SLURM_NODE2_NAME}
     hostname: ${SLURM_NODE2_NAME}
+    privileged: ${SLURM_PRIVILEGED:-false}
     environment:
       - SLURM_ROLE=slurmd
       - SLURM_NODE_NAME=${SLURM_NODE2_NAME}
@@ -64,6 +85,15 @@ services:
       - SLURM_NODE1_NAME=${SLURM_NODE1_NAME}
       - SLURM_NODE2_NAME=${SLURM_NODE2_NAME}
       - SLURM_GPU_COUNT=${SLURM_GPU_COUNT:-}
+      - SLURM_HOST_USER_NAME=${SLURM_HOST_USER_NAME:-}
+      - SLURM_HOST_UID=${SLURM_HOST_UID:-}
+      - SLURM_HOST_GID=${SLURM_HOST_GID:-}
+      - SLURM_ADMIN_ACCOUNT=${SLURM_ADMIN_ACCOUNT:-admin}
+      - SLURM_TENANTS=${SLURM_TENANTS:-}
+      - SLURM_TENANTS_DIR=${SLURM_TENANTS_DIR:-/work/tenants}
+      - SLURM_TENANT_UID_BASE=${SLURM_TENANT_UID_BASE:-10000}
+      - SLURM_TENANT_GID_BASE=${SLURM_TENANT_GID_BASE:-10000}
+      - SLURM_ENABLE_CGROUP=${SLURM_ENABLE_CGROUP:-0}
     volumes:
       - "${SLURM_WORKDIR}:/work"
       - slurm-shared:/shared
