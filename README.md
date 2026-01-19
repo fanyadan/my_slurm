@@ -218,6 +218,9 @@ Accounting (for `sacct`):
 Accounting behavior:
 - The controller starts `slurmdbd` and bootstraps a minimal accounting setup (admin + tenants) on startup.
 - MariaDB state is persisted in the `mariadb-data` Docker volume. `down` keeps it; `down -v` wipes it.
+- If you **upgrade Slurm** (especially across major versions), `slurmdbd` may refuse to start due to an old schema.
+  - Fix (dev-only): wipe the MariaDB volume and restart:
+    - `bash setup_slurm_local.sh down` then `docker volume rm slurm-local_mariadb-data`
 
 Security note: defaults are for **local dev only**.
 

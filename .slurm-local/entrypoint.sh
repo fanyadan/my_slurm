@@ -335,7 +335,15 @@ cp /etc/slurm/slurm.conf /etc/slurm-llnl/slurm.conf
 # Optional: Slurm cgroup plugin configuration
 if [[ "$ENABLE_CGROUP" -eq 1 ]]; then
   cat >/etc/slurm/cgroup.conf <<'EOF'
-CgroupAutomount=yes
+# Use cgroup v2 when available (Docker Desktop uses cgroup v2).
+CgroupPlugin=autodetect
+
+# This dev image doesn't run systemd; avoid D-Bus/systemd scope management.
+IgnoreSystemd=yes
+
+# Help in container environments where controllers may not be enabled by default.
+EnableControllers=yes
+
 ConstrainCores=yes
 ConstrainRAMSpace=yes
 EOF
